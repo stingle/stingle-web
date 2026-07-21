@@ -2,6 +2,8 @@ import { equalBytes } from "./crypto/bytes";
 import { decryptPlaintextRange, encryptFileBytes, MemoryByteSource } from "./crypto/file";
 import { generateKeyPair } from "./crypto/keys";
 import { registerMediaSession } from "./media/client";
+import probeMp4Url from "../tests/fixtures/media/probe.mp4?url";
+import probeWebmUrl from "../tests/fixtures/media/probe.webm?url";
 
 export async function rangeRoundTrip(): Promise<boolean> {
   const keyPair = await generateKeyPair();
@@ -40,8 +42,8 @@ export async function rangeRoundTrip(): Promise<boolean> {
 
 async function loadVideoFixture(): Promise<{ bytes: Uint8Array; mimeType: string; filename: string }> {
   const candidates = [
-    { path: "/fixtures/probe.mp4", mimeType: "video/mp4", filename: "probe.mp4" },
-    { path: "/fixtures/probe.webm", mimeType: "video/webm", filename: "probe.webm" },
+    { path: probeMp4Url, mimeType: "video/mp4", filename: "probe.mp4" },
+    { path: probeWebmUrl, mimeType: "video/webm", filename: "probe.webm" },
   ];
   let fixture: (typeof candidates)[number] | undefined;
   for (const candidate of candidates) {

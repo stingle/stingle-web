@@ -93,7 +93,7 @@ fn make_file(
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     stingle_crypto::init()?;
-    let password = "phase0-correct-horse-battery-staple";
+    let password = "stingle-web-test-password";
     let user = keys::KeyPair::generate()?;
     let bundle = keys::KeyBundle::create(password, &user)?;
     let account_salt: Vec<u8> = (0u8..16).collect();
@@ -102,18 +102,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let gallery_file = make_file(
         deterministic_plaintext(4_097, 17),
-        "phase-0-gallery.mp4",
+        "test-gallery.mp4",
         3,
         137,
         &user.public_key,
     )?;
 
-    let album_name = "Phase 0 shared album";
+    let album_name = "Stingle Web test album";
     let (album_keys, album_data) =
         album::generate_encrypted_album_data(&user.public_key, album_name)?;
     let album_file = make_file(
         deterministic_plaintext(8_191, 89),
-        "phase-0-album.mov",
+        "test-album.mov",
         3,
         241,
         &album_keys.public_key,

@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 publish = false
 license = "GPL-3.0-only"
-description = "Generates deterministic Stingle Web interoperability fixtures"
+description = "Generates synthetic Stingle Web interoperability fixtures"
 
 [dependencies]
 base64 = "0.22"
