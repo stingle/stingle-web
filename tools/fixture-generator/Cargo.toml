@@ -1,0 +1,13 @@
+[package]
+name = "stingle-web-fixture-generator"
+version = "0.1.0"
+edition = "2024"
+publish = false
+license = "GPL-3.0-only"
+description = "Generates deterministic Stingle Web interoperability fixtures"
+
+[dependencies]
+base64 = "0.22"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+stingle-crypto = { git = "https://github.com/stingle/stingle-desktop.git", rev = "3d38359e07217131a84a8bb98b7f72be396a6152" }
