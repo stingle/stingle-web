@@ -64,6 +64,11 @@ function groupFilesByDate(files: LocalFile[]): Array<{ label: string; files: Loc
   return groups;
 }
 
+function upsertNewest(files: LocalFile[], uploaded: LocalFile): LocalFile[] {
+  return [uploaded, ...files.filter((file) => file.file !== uploaded.file || file.albumId !== uploaded.albumId)]
+    .sort((left, right) => right.dateCreated - left.dateCreated);
+}
+
 function albumDescriptor(album: LocalAlbum): EncryptedAlbumDescriptor {
   return { albumId: album.albumId, publicKey: album.publicKey, encPrivateKey: album.encPrivateKey, metadata: album.metadata };
 }
@@ -172,8 +177,12 @@ export function LibraryPanel({ auth, session }: { auth: AuthService; session: Au
     setFileMetadata((current) => ({ ...current, ...Object.fromEntries(decrypted.files.map((file) => [file.id, file])) }));
     void loadThumbnails(nextGallery, 0, "gallery");
     const covers = (await Promise.all(nextAlbums
-      .filter((album) => album.cover && album.cover !== BLANK_ALBUM_COVER)
-      .map(async (album) => ({ album, file: await store.getAlbumFile(album.albumId, album.cover) }))))
+      .filter((album) => album.cover !== BLANK_ALBUM_COVER)
+      .map(async (album) => {
+        const explicit = album.cover ? await store.getAlbumFile(album.albumId, album.cover) : undefined;
+        const file = explicit ?? (await store.listAlbumFiles(album.albumId, 1))[0];
+        return { album, file };
+      })))
       .filter((entry): entry is { album: LocalAlbum; file: LocalFile } => Boolean(entry.file));
     setAlbumCoverFiles(Object.fromEntries(covers.map(({ album, file }) => [album.albumId, file])));
     for (const { album, file } of covers) void loadThumbnails([file], 2, "album", albumDescriptor(album));
@@ -336,9 +345,12 @@ export function LibraryPanel({ auth, session }: { auth: AuthService; session: Au
         if (!file) continue;
         setMutation(`Preparing ${index + 1} of ${files.length}…`);
         const prepared = await prepareBrowserMedia(file);
+        const dataSize = prepared.original.byteLength;
+        const previewUrl = URL.createObjectURL(new Blob([prepared.thumbnail.slice().buffer], { type: "image/jpeg" }));
+        let previewAccepted = false;
         try {
           setMutation(`Uploading ${index + 1} of ${files.length}…`);
-          await auth.upload(
+          const uploaded = await auth.upload(
             prepared.original,
             prepared.thumbnail,
             prepared.filename,
@@ -347,7 +359,38 @@ export function LibraryPanel({ auth, session }: { auth: AuthService; session: Au
             prepared.dateCreated,
             targetAlbum,
           );
+          const localFile: LocalFile = {
+            ...uploaded,
+            isLocal: false,
+            isRemote: true,
+            reupload: false,
+          };
+          await storeRef.current?.putUploadedFile(localFile);
+          const keySet = selectedAlbum ? "album" : "gallery";
+          const key = fileKey(keySet, localFile);
+          thumbnailUrlsRef.current.set(key, previewUrl);
+          previewAccepted = true;
+          setThumbnailUrls((current) => ({ ...current, [key]: previewUrl }));
+          setFileMetadata((current) => ({
+            ...current,
+            [key]: {
+              id: key,
+              filename: prepared.filename,
+              fileType: prepared.fileType,
+              dataSize: dataSize.toString(),
+              videoDuration: prepared.videoDuration,
+            },
+          }));
+          if (selectedAlbum) {
+            setAlbumFiles((current) => upsertNewest(current, localFile));
+            if (selectedAlbum.cover !== BLANK_ALBUM_COVER && !selectedAlbum.cover) {
+              setAlbumCoverFiles((current) => ({ ...current, [selectedAlbum.albumId]: localFile }));
+            }
+          } else {
+            setGallery((current) => upsertNewest(current, localFile));
+          }
         } finally {
+          if (!previewAccepted) URL.revokeObjectURL(previewUrl);
           if (prepared.original.byteLength) prepared.original.fill(0);
           if (prepared.thumbnail.byteLength) prepared.thumbnail.fill(0);
         }
@@ -360,6 +403,79 @@ export function LibraryPanel({ auth, session }: { auth: AuthService; session: Au
       setMutation(undefined);
       if (uploadInputRef.current) uploadInputRef.current.value = "";
     }
+  }
+
+  async function saveViewerFile(): Promise<void> {
+    const current = viewerRef.current;
+    if (!current || mutation) return;
+    setMutation("Saving item…");
+    setError(undefined);
+    let plaintext: Uint8Array | undefined;
+    try {
+      const encrypted = await auth.downloadEncrypted(current.file.file, current.set, false);
+      plaintext = await auth.decryptFileBlob(encrypted, current.file.headers, false, current.album);
+      const blob = new Blob([plaintext.slice().buffer], {
+        type: mimeType(current.metadata.filename ?? (current.isVideo ? "video.mp4" : "photo.jpg"), current.isVideo),
+      });
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = current.metadata.filename ?? (current.isVideo ? "video.mp4" : "photo.jpg");
+      anchor.hidden = true;
+      document.body.append(anchor);
+      anchor.click();
+      anchor.remove();
+      window.setTimeout(() => URL.revokeObjectURL(url), 1_000);
+    } catch (caught) {
+      setError(message(caught));
+    } finally {
+      plaintext?.fill(0);
+      setMutation(undefined);
+    }
+  }
+
+  function moveViewerFile(): void {
+    const current = viewerRef.current;
+    if (!current) return;
+    const keySet = current.set === 2 ? "album" : current.set === 1 ? "trash" : "gallery";
+    setSelectedKeys(new Set([fileKey(keySet, current.file)]));
+    setSelectionMode(true);
+    closeViewer();
+    setAlbumPickerMode("move");
+  }
+
+  async function trashViewerFile(): Promise<void> {
+    const current = viewerRef.current;
+    if (!current || mutation || !window.confirm("Move this item to trash?")) return;
+    closeViewer();
+    await runMutation("Moving to trash…", () => auth.moveFiles({
+      files: [{ file: current.file.file, headers: current.file.headers, isRemote: current.file.isRemote }],
+      setFrom: current.set as 0 | 2,
+      setTo: 1,
+      ...(current.album ? { sourceAlbum: current.album } : {}),
+      isMoving: true,
+    }));
+  }
+
+  async function restoreViewerFile(): Promise<void> {
+    const current = viewerRef.current;
+    if (!current || mutation) return;
+    closeViewer();
+    await runMutation("Restoring item…", () => auth.moveFiles({
+      files: [{ file: current.file.file, headers: current.file.headers, isRemote: current.file.isRemote }],
+      setFrom: 1,
+      setTo: 0,
+      isMoving: true,
+    }));
+  }
+
+  async function deleteViewerFile(): Promise<void> {
+    const current = viewerRef.current;
+    if (!current || mutation || !window.confirm("Permanently delete this item? This cannot be undone.")) return;
+    closeViewer();
+    await runMutation("Deleting item…", () => auth.deleteFiles([
+      { file: current.file.file, headers: current.file.headers, isRemote: current.file.isRemote },
+    ]));
   }
 
   useEffect(() => {
@@ -459,9 +575,14 @@ export function LibraryPanel({ auth, session }: { auth: AuthService; session: Au
       </div>}
     </section>
     {showCreateAlbum ? <div className="viewer-backdrop" role="dialog" aria-modal="true" aria-label="Create album"><form className="action-dialog" onSubmit={(event) => { event.preventDefault(); void createAlbum(); }}><h2>Create album</h2><label>Album name<input autoFocus maxLength={255} value={newAlbumName} onChange={(event) => setNewAlbumName(event.target.value)} /></label><div className="dialog-actions"><button type="button" onClick={() => { setShowCreateAlbum(false); setNewAlbumName(""); }}>Cancel</button><button type="submit" disabled={!newAlbumName.trim() || Boolean(mutation)}>Create</button></div></form></div> : null}
-    {albumPickerMode ? <div className="viewer-backdrop" role="dialog" aria-modal="true" aria-label={`${albumPickerMode === "move" ? "Move" : "Copy"} to album`}><div className="action-dialog"><h2>{albumPickerMode === "move" ? "Move" : "Copy"} to album</h2><div className="album-choice-list">{writableAlbums.map((album) => <button type="button" key={album.albumId} onClick={() => void moveSelectedToAlbum(album, albumPickerMode === "move")}>{albumNames[album.albumId] ?? "Encrypted album"}</button>)}</div><div className="dialog-actions"><button type="button" onClick={() => setAlbumPickerMode(undefined)}>Cancel</button></div></div></div> : null}
+    {albumPickerMode ? <div className="viewer-backdrop" role="dialog" aria-modal="true" aria-label={`${albumPickerMode === "move" ? "Move" : "Copy"} item`}><div className="action-dialog"><h2>{albumPickerMode === "move" ? "Move" : "Copy"} item</h2><div className="album-choice-list">{selectedAlbum ? <button type="button" onClick={() => void moveSelectedToGallery(albumPickerMode === "move")}>Gallery</button> : null}{writableAlbums.map((album) => <button type="button" key={album.albumId} onClick={() => void moveSelectedToAlbum(album, albumPickerMode === "move")}>{albumNames[album.albumId] ?? "Encrypted album"}</button>)}</div><div className="dialog-actions"><button type="button" onClick={() => setAlbumPickerMode(undefined)}>Cancel</button></div></div></div> : null}
     {viewer ? <div className="media-viewer" role="dialog" aria-modal="true" aria-label={viewer.metadata.filename ?? "Media viewer"} data-media-transport={viewer.transport} onClick={closeViewer}>
       <button className="viewer-close" type="button" aria-label="Close viewer" onClick={(event) => { event.stopPropagation(); closeViewer(); }}>×</button>
+      <div className="viewer-actions" onClick={(event) => event.stopPropagation()}>
+        {viewer.set !== 1 ? <button type="button" disabled title="Encrypted Stingle sharing will be added in a later phase">👥 Share</button> : null}
+        <button type="button" disabled={Boolean(mutation)} onClick={() => void saveViewerFile()}>⤓ Save</button>
+        {viewer.set === 1 ? <><button type="button" disabled={Boolean(mutation)} onClick={() => void restoreViewerFile()}>↶ Restore</button><button className="danger-button" type="button" disabled={Boolean(mutation)} onClick={() => void deleteViewerFile()}>🗑 Delete</button></> : (!selectedAlbum || selectedAlbum.isOwner) ? <><button type="button" disabled={Boolean(mutation) || (!selectedAlbum && writableAlbums.length === 0)} onClick={moveViewerFile}>→ Move</button><button className="danger-button" type="button" disabled={Boolean(mutation)} onClick={() => void trashViewerFile()}>🗑 Delete</button></> : null}
+      </div>
       {viewerIndex > 0 ? <button className="viewer-nav viewer-prev" type="button" aria-label="Previous item" onClick={(event) => { event.stopPropagation(); navigateViewer(-1); }}>‹</button> : null}
       {viewer.isVideo ? viewer.loading ? <div className="viewer-message">Preparing encrypted video…</div> : viewer.error ? <p className="error" role="alert">{viewer.error}</p> : viewer.url ? <video src={viewer.url} controls autoPlay preload="auto" playsInline onClick={(event) => event.stopPropagation()} /> : null : viewer.url || viewer.previewUrl ? <ZoomablePhoto key={`${viewer.file.albumId ?? "gallery"}:${viewer.file.file}`} {...(viewer.previewUrl ? { previewUrl: viewer.previewUrl } : {})} {...(viewer.url ? { originalUrl: viewer.url } : {})} loading={viewer.loading} alt={viewer.metadata.filename ?? "Decrypted photo"} /> : viewer.loading ? <div className="viewer-message">Downloading encrypted original…</div> : viewer.error ? <p className="error" role="alert">{viewer.error}</p> : null}
       {viewer.error && (viewer.url || viewer.previewUrl) ? <p className="viewer-photo-error" role="alert">{viewer.error}</p> : null}

@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { expect, test } from "@playwright/test";
 
 const heicFixture = readFileSync(new URL("../fixtures/libheif-example.heic", import.meta.url));
+const videoFixture = readFileSync(new URL("../fixtures/media/probe.mp4", import.meta.url));
 
 test("converts a decrypted HEIC original to a displayable JPEG", async ({ page, browserName }) => {
   test.skip(browserName !== "chromium", "the local decoder wiring needs one browser gate");
@@ -29,11 +30,15 @@ test("converts a decrypted HEIC original to a displayable JPEG", async ({ page, 
 
 test("extracts an encrypted-upload thumbnail and duration from a browser video", async ({ page, browserName }) => {
   test.skip(browserName !== "chromium", "video thumbnail preparation needs one browser gate");
+  await page.route("https://fixture.test/probe.mp4", (route) => route.fulfill({
+    contentType: "video/mp4",
+    body: videoFixture,
+  }));
   await page.goto("/");
   const result = await page.evaluate(async () => {
     // @ts-expect-error Vite serves this browser-only source module during the test.
     const { prepareBrowserMedia } = await import("/src/media/upload-preparation.ts");
-    const response = await fetch("/fixtures/probe.mp4");
+    const response = await fetch("https://fixture.test/probe.mp4");
     const bytes = await response.arrayBuffer();
     const prepared = await prepareBrowserMedia(new File([bytes], "probe.mp4", {
       type: "video/mp4",

@@ -275,6 +275,13 @@ export class MirrorStore {
     return result;
   }
 
+  async putUploadedFile(file: LocalFile): Promise<void> {
+    const storeName = file.albumId ? stores.albumFiles : stores.files;
+    const transaction = this.database.transaction(storeName, "readwrite");
+    await request(transaction.objectStore(storeName).put(file));
+    await transactionDone(transaction);
+  }
+
   async listFiles(set: "files" | "trash", limit = 200): Promise<LocalFile[]> {
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 1_000) throw new Error("invalid page limit");
     const transaction = this.database.transaction(set, "readonly");

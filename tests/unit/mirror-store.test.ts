@@ -123,4 +123,21 @@ describe("per-account sync mirror", () => {
     expect((await store.listAlbumFiles("album")).map((file) => file.file)).toEqual(["two.sp", "one.sp"]);
     store.close();
   });
+
+  test("persists accepted uploads immediately without advancing sync cursors", async () => {
+    const store = await MirrorStore.open("account-upload", new IDBFactory());
+    const gallery = {
+      file: "gallery-upload.sp", version: 1, headers: "a*b", dateCreated: 20, dateModified: 21,
+      isLocal: false, isRemote: true, reupload: false,
+    };
+    const album = {
+      ...gallery, file: "album-upload.sp", albumId: "album",
+    };
+    await store.putUploadedFile(gallery);
+    await store.putUploadedFile(album);
+    expect((await store.listFiles("files")).map((file) => file.file)).toEqual(["gallery-upload.sp"]);
+    expect((await store.listAlbumFiles("album")).map((file) => file.file)).toEqual(["album-upload.sp"]);
+    expect(await store.getCursors()).toEqual(ZERO_CURSORS);
+    store.close();
+  });
 });

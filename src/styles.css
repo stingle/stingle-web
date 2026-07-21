@@ -141,6 +141,10 @@ dd { margin: 0; overflow-wrap: anywhere; font-weight: 700; }
 .zoom-controls { position: fixed; z-index: 102; bottom: 46px; left: 50%; transform: translateX(-50%); display: flex; align-items: center; gap: 8px; }
 .zoom-controls button, .viewer-nav, .viewer-close { border: 1px solid #ffffff26; background: #0009; color: white; }
 .zoom-controls button { min-width: 38px; border-radius: 6px; padding: 7px 10px; }
+.viewer-actions { position: fixed; z-index: 103; top: 14px; left: 16px; display: flex; gap: 8px; }
+.viewer-actions button { border: 1px solid #ffffff26; border-radius: 6px; padding: 8px 11px; background: #0009; color: white; }
+.viewer-actions button:disabled { opacity: .45; cursor: default; }
+.viewer-actions .danger-button { border-color: #ff76764d; color: #ffb4b4; }
 .viewer-close { position: fixed; z-index: 103; top: 16px; right: 20px; border: 0; padding: 4px 10px; background: transparent; font-size: 1.75rem; }
 .viewer-nav { position: fixed; z-index: 103; top: 50%; transform: translateY(-50%); border-radius: 7px; padding: 10px 16px; font-size: 1.9rem; }
 .viewer-prev { left: 16px; }
@@ -173,6 +177,8 @@ dd { margin: 0; overflow-wrap: anywhere; font-weight: 700; }
   .selection-toolbar { align-items: stretch; }
   .selection-toolbar button { flex: 1 1 auto; }
   .file-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+  .viewer-actions { right: 58px; overflow-x: auto; }
+  .viewer-actions button { flex: 0 0 auto; }
 }
 
 @media (prefers-reduced-motion: no-preference) {

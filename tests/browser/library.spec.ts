@@ -150,6 +150,13 @@ test("shows the cached scaled photo while its original downloads", async ({ page
   expect(originalRequested).toBe(true);
   releaseOriginal();
   await expect(dialog.getByRole("status", { name: "Loading full-resolution photo" })).toHaveCount(0);
+  await expect(dialog.getByRole("button", { name: /Share/u })).toBeVisible();
+  await expect(dialog.getByRole("button", { name: /Save/u })).toBeVisible();
+  await expect(dialog.getByRole("button", { name: /Move/u })).toBeVisible();
+  await expect(dialog.getByRole("button", { name: /Delete/u })).toBeVisible();
+  const downloadPromise = page.waitForEvent("download");
+  await dialog.getByRole("button", { name: /Save/u }).click();
+  expect((await downloadPromise).suggestedFilename()).toBe("stingle-logo.png");
   await expect(dialog.getByText("1 / 3", { exact: true })).toBeVisible();
   await expect(dialog.getByRole("button", { name: "Previous item" })).toHaveCount(0);
   await dialog.getByRole("button", { name: "Next item" }).click();
@@ -249,8 +256,16 @@ test("renders album covers and sends encrypted item or blank cover mutations", a
         publicKey: fixture.album.publicKeyBase64, metadata: fixture.album.metadataBase64,
         isShared: 0, isHidden: 0, isOwner: 1, members: "", permissions: "", isLocked: 0,
         cover: "__b__", dateCreated: 1_699_000_000_000, dateModified: 1_699_000_000_001,
+      }, {
+        albumId: "default-album", encPrivateKey: fixture.album.encryptedPrivateKeyBase64,
+        publicKey: fixture.album.publicKeyBase64, metadata: fixture.album.metadataBase64,
+        isShared: 0, isHidden: 0, isOwner: 1, members: "", permissions: "", isLocked: 0,
+        cover: "", dateCreated: 1_698_000_000_000, dateModified: 1_698_000_000_001,
       }],
-      albumFiles: [{ file: "album-cover.sp", albumId: "fixture-album", version: 1, headers, dateCreated: 1_700_000_000_000, dateModified: 1_700_000_000_001 }],
+      albumFiles: [
+        { file: "album-cover.sp", albumId: "fixture-album", version: 1, headers, dateCreated: 1_700_000_000_000, dateModified: 1_700_000_000_001 },
+        { file: "default-first.sp", albumId: "default-album", version: 1, headers, dateCreated: 1_698_000_000_000, dateModified: 1_698_000_000_001 },
+      ],
     }) });
     if (path.endsWith("/sync/download")) return route.fulfill({ contentType: "application/octet-stream", body: Buffer.from(fields.get("thumb") === "1" ? thumbnail.blob : original.blob) });
     if (path.endsWith("/sync/changeAlbumCover")) {
@@ -267,8 +282,8 @@ test("renders album covers and sends encrypted item or blank cover mutations", a
   await page.getByRole("button", { name: "Albums", exact: true }).click();
   await expect(page.locator(".album-art.blank")).toBeVisible({ timeout: 60_000 });
   const album = page.locator(".album-tile").filter({ has: page.locator(".album-art img") });
-  await expect(album.locator(".album-art img")).toBeVisible({ timeout: 60_000 });
-  await album.click();
+  await expect(album).toHaveCount(2, { timeout: 60_000 });
+  await album.first().click();
   await expect(page.getByRole("heading", { name: fixture.album.name })).toBeVisible();
   await page.getByRole("button", { name: "Select items" }).click();
   await page.getByRole("button", { name: "album-cover.png" }).click();
@@ -329,6 +344,55 @@ test("prepares, encrypts, uploads, and re-syncs a browser-selected photo", async
   await expect.poll(() => uploads, { timeout: 30_000 }).toBe(1);
   await expect.poll(() => syncs, { timeout: 30_000 }).toBeGreaterThanOrEqual(2);
   await expect(page.getByText("Uploading 1 of 1…")).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "stingle-logo.png" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "stingle-logo.png" }).locator(".file-preview.loaded")).toBeVisible();
+});
+
+test("shows an album upload and its implicit cover before the update feed returns it", async ({ page, browserName }) => {
+  test.skip(browserName !== "chromium", "album upload reconciliation and worker encryption need one browser gate");
+  let uploads = 0;
+  await page.route("**/api/v2/**", async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (path.endsWith("/login/preLogin")) return route.fulfill({ contentType: "application/json", body: envelope({ salt: fixture.accountSaltHex }) });
+    if (path.endsWith("/login/login")) return route.fulfill({ contentType: "application/json", body: envelope({
+      token: "album-upload-token", userId: "album-upload-user", keyBundle: fixture.keyBundleBase64,
+      serverPublicKey: fixture.params.serverPublicKeyBase64, isKeyBackedUp: "1",
+      homeFolder: `album-uploads-${Date.now()}`, addons: [],
+    }) });
+    if (path.endsWith("/sync/getUpdates")) return route.fulfill({ contentType: "application/json", body: envelope({
+      files: [], trash: [], contacts: [], deletes: [], albumFiles: [],
+      albums: [{
+        albumId: "upload-album", encPrivateKey: fixture.album.encryptedPrivateKeyBase64,
+        publicKey: fixture.album.publicKeyBase64, metadata: fixture.album.metadataBase64,
+        isShared: 0, isHidden: 0, isOwner: 1, members: "", permissions: "", isLocked: 0,
+        cover: "", dateCreated: 1_700_000_000_000, dateModified: 1_700_000_000_001,
+      }],
+    }) });
+    if (path.endsWith("/sync/upload")) {
+      uploads += 1;
+      return route.fulfill({ contentType: "application/json", body: envelope({ spaceUsed: "1", spaceQuota: "100" }) });
+    }
+    return route.fulfill({ contentType: "application/json", body: envelope() });
+  });
+
+  await page.goto("/");
+  await page.getByLabel("Email").fill("album-uploads@example.test");
+  await page.getByLabel("Password", { exact: true }).fill(fixture.password);
+  await page.getByRole("button", { name: "Sign in", exact: true }).click();
+  await page.getByRole("button", { name: "Albums", exact: true }).click();
+  await page.locator(".album-tile").click();
+  const chooserPromise = page.waitForEvent("filechooser");
+  await page.getByRole("button", { name: "Upload", exact: true }).click();
+  const chooser = await chooserPromise;
+  await chooser.setFiles(fileURLToPath(new URL("../../src/assets/stingle-logo.png", import.meta.url)));
+  await expect.poll(() => uploads, { timeout: 30_000 }).toBe(1);
+  await expect(page.getByRole("button", { name: "stingle-logo.png" })).toBeVisible();
+  await page.getByRole("button", { name: "stingle-logo.png" }).click();
+  await page.getByRole("dialog", { name: "stingle-logo.png" }).getByRole("button", { name: /Move/u }).click();
+  await expect(page.getByRole("dialog", { name: "Move item" }).getByRole("button", { name: "Gallery" })).toBeVisible();
+  await page.getByRole("dialog", { name: "Move item" }).getByRole("button", { name: "Cancel" }).click();
+  await page.getByRole("button", { name: "Back to albums" }).click();
+  await expect(page.locator(".album-tile .album-art img")).toBeVisible();
 });
 
 test("creates an album and sends a selected gallery item to trash with encrypted params", async ({ page, browserName }) => {

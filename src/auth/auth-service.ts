@@ -57,6 +57,10 @@ export interface MoveFilesInput {
 export interface UploadedFileRef {
   file: string;
   headers: string;
+  version: number;
+  dateCreated: number;
+  dateModified: number;
+  albumId?: string;
 }
 
 function publicSession(session: PrivateSession): AuthSession {
@@ -299,6 +303,7 @@ export class AuthService {
   ): Promise<UploadedFileRef> {
     if (!this.session) throw new Error("not authenticated");
     const prepared = await this.vault.prepareUpload(original, thumbnail, filename, fileType, videoDuration, album);
+    const dateModified = Date.now();
     try {
       await this.api.uploadEncrypted(this.session.token, {
         file: prepared.file,
@@ -306,12 +311,19 @@ export class AuthService {
         ...(album ? { albumId: album.albumId } : {}),
         version: 1,
         dateCreated,
-        dateModified: Date.now(),
+        dateModified,
         headers: prepared.headers,
         encryptedFile: prepared.encryptedFile,
         encryptedThumb: prepared.encryptedThumb,
       });
-      return { file: prepared.file, headers: prepared.headers };
+      return {
+        file: prepared.file,
+        headers: prepared.headers,
+        version: 1,
+        dateCreated,
+        dateModified,
+        ...(album ? { albumId: album.albumId } : {}),
+      };
     } finally {
       prepared.encryptedFile.fill(0);
       prepared.encryptedThumb.fill(0);
