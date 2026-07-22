@@ -34,6 +34,7 @@ test("decrypts a synced item, loads its thumbnail, and opens a media session", a
   test.skip(browserName !== "chromium", "library media wiring is covered once; range playback has its own cross-browser suite");
   const encryptedBlob = Buffer.from(fixture.galleryFile.blobBase64, "base64");
   let originalDownloads = 0;
+  let thumbnailDownloads = 0;
   let storageRangeRequests = 0;
   await page.route("https://storage.example/**", async (route) => {
     storageRangeRequests += 1;
@@ -70,7 +71,8 @@ test("decrypts a synced item, loads its thumbnail, and opens a media session", a
     }) });
     if (path.endsWith("/sync/getUrl")) return route.fulfill({ contentType: "application/json", body: envelope({ url: "https://storage.example/fixture.sp?signature=test" }) });
     if (path.endsWith("/sync/download")) {
-      if (!new URLSearchParams(route.request().postData() ?? "").has("thumb")) originalDownloads += 1;
+      if (new URLSearchParams(route.request().postData() ?? "").has("thumb")) thumbnailDownloads += 1;
+      else originalDownloads += 1;
       return route.fulfill({ contentType: "application/octet-stream", body: encryptedBlob });
     }
     if (path.endsWith("/login/logout")) return route.fulfill({ contentType: "application/json", body: envelope() });
@@ -95,6 +97,11 @@ test("decrypts a synced item, loads its thumbnail, and opens a media session", a
   expect({ originalDownloads, storageRangeRequests }).toEqual({ originalDownloads: 1, storageRangeRequests: 0 });
   await page.getByRole("button", { name: "Close viewer" }).click();
   await expect(page.getByRole("dialog")).toHaveCount(0);
+  expect(thumbnailDownloads).toBe(1);
+  await page.reload();
+  await expect(page.getByRole("button", { name: new RegExp(fixture.galleryFile.filename, "u") })
+    .locator(".file-preview.loaded")).toBeVisible({ timeout: 60_000 });
+  expect(thumbnailDownloads).toBe(1);
 });
 
 test("shows the cached scaled photo while its original downloads", async ({ page, browserName }) => {
@@ -112,6 +119,8 @@ test("shows the cached scaled photo while its original downloads", async ({ page
   let originalRequested = false;
   let releaseOriginal!: () => void;
   const originalGate = new Promise<void>((resolve) => { releaseOriginal = resolve; });
+  let releaseNeighborThumbnail!: () => void;
+  const neighborThumbnailGate = new Promise<void>((resolve) => { releaseNeighborThumbnail = resolve; });
 
   await page.route("**/api/v2/**", async (route) => {
     const path = new URL(route.request().url()).pathname;
@@ -127,7 +136,10 @@ test("shows the cached scaled photo while its original downloads", async ({ page
       trash: [], albums: [], albumFiles: [], contacts: [], deletes: [],
     }) });
     if (path.endsWith("/sync/download")) {
-      if (fields.get("thumb") === "1") return route.fulfill({ contentType: "application/octet-stream", body: Buffer.from(thumbnail.blob) });
+      if (fields.get("thumb") === "1") {
+        if (fields.get("file") === "photo-1.sp") await neighborThumbnailGate;
+        return route.fulfill({ contentType: "application/octet-stream", body: Buffer.from(thumbnail.blob) });
+      }
       originalRequested = true;
       await originalGate;
       return route.fulfill({ contentType: "application/octet-stream", body: Buffer.from(original.blob) });
@@ -159,8 +171,15 @@ test("shows the cached scaled photo while its original downloads", async ({ page
   expect((await downloadPromise).suggestedFilename()).toBe("stingle-logo.png");
   await expect(dialog.getByText("1 / 3", { exact: true })).toBeVisible();
   await expect(dialog.getByRole("button", { name: "Previous item" })).toHaveCount(0);
+  const firstFit = await dialog.locator(".zoom-inner").boundingBox();
   await dialog.getByRole("button", { name: "Next item" }).click();
   await expect(dialog.getByText("2 / 3", { exact: true })).toBeVisible();
+  await expect(dialog.getByRole("status", { name: "Loading full-resolution photo" })).toHaveCount(0);
+  releaseNeighborThumbnail();
+  await expect(dialog.locator(".zoom-preview")).toBeVisible();
+  const nextFit = await dialog.locator(".zoom-inner").boundingBox();
+  expect(nextFit?.width).toBeCloseTo(firstFit?.width ?? 0, 0);
+  expect(nextFit?.height).toBeCloseTo(firstFit?.height ?? 0, 0);
   await page.keyboard.press("ArrowRight");
   await expect(dialog.getByText("3 / 3", { exact: true })).toBeVisible();
   await page.keyboard.press("ArrowLeft");
@@ -221,6 +240,194 @@ test("keeps a 32-request thumbnail pool fed until the queue is empty", async ({ 
   expect(peakThumbnailDownloads).toBe(32);
 });
 
+test("prioritizes an opened album ahead of pending gallery thumbnails", async ({ page, browserName }) => {
+  test.skip(browserName !== "chromium", "thumbnail scheduling needs one browser gate");
+  const galleryThumbnail = Buffer.from(fixture.galleryFile.blobBase64, "base64");
+  const image = new Uint8Array(readFileSync(new URL("../../src/assets/stingle-logo.png", import.meta.url)));
+  const albumPublicKey = await fromBase64(fixture.album.publicKeyBase64);
+  const albumOriginal = await encryptFileBytes(image, {
+    filename: "priority.png", fileType: 2, recipientPublicKey: albumPublicKey,
+  });
+  const albumThumbnail = await encryptFileBytes(image, {
+    filename: "priority.png", fileType: 2, recipientPublicKey: albumPublicKey,
+    fileId: albumOriginal.header.fileId,
+  });
+  const albumHeaders = `${await toBase64Url(albumOriginal.outerHeader)}*${await toBase64Url(albumThumbnail.outerHeader)}`;
+  let activeGallery = 0;
+  let releaseGallery!: () => void;
+  const galleryGate = new Promise<void>((resolve) => { releaseGallery = resolve; });
+  const downloadsAfterRelease: string[] = [];
+  let released = false;
+
+  await page.route("**/api/v2/**", async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    const fields = new URLSearchParams(route.request().postData() ?? "");
+    if (path.endsWith("/login/preLogin")) return route.fulfill({ contentType: "application/json", body: envelope({ salt: fixture.accountSaltHex }) });
+    if (path.endsWith("/login/login")) return route.fulfill({ contentType: "application/json", body: envelope({
+      token: "priority-token", userId: "priority-user", keyBundle: fixture.keyBundleBase64,
+      serverPublicKey: fixture.params.serverPublicKeyBase64, isKeyBackedUp: "1",
+      homeFolder: `priority-${Date.now()}`, addons: [],
+    }) });
+    if (path.endsWith("/sync/getUpdates")) return route.fulfill({ contentType: "application/json", body: envelope({
+      files: Array.from({ length: 40 }, (_, index) => ({
+        file: `gallery-${index}.sp`, version: 1,
+        headers: `${fixture.galleryFile.outerHeaderBase64Url}*${fixture.galleryFile.outerHeaderBase64Url}`,
+        dateCreated: 1_700_000_000_000 + index, dateModified: 1_700_000_000_001 + index,
+      })),
+      trash: [],
+      albums: [{
+        albumId: "priority-album", encPrivateKey: fixture.album.encryptedPrivateKeyBase64,
+        publicKey: fixture.album.publicKeyBase64, metadata: fixture.album.metadataBase64,
+        isShared: false, isHidden: false, isOwner: true, members: "", permissions: "111",
+        isLocked: false, cover: "", dateCreated: 1_700_000_000_000, dateModified: 1_700_000_000_001,
+      }],
+      albumFiles: Array.from({ length: 2 }, (_, index) => ({
+        file: `album-priority-${index}.sp`, albumId: "priority-album", version: 1, headers: albumHeaders,
+        dateCreated: 1_700_000_000_100 + index, dateModified: 1_700_000_000_101 + index,
+      })),
+      contacts: [], deletes: [],
+    }) });
+    if (path.endsWith("/sync/download") && fields.get("thumb") === "1") {
+      const file = fields.get("file") ?? "";
+      if (released) downloadsAfterRelease.push(file);
+      if (file.startsWith("gallery-")) {
+        activeGallery += 1;
+        await galleryGate;
+        activeGallery -= 1;
+        return route.fulfill({ contentType: "application/octet-stream", body: galleryThumbnail }).catch(() => undefined);
+      }
+      return route.fulfill({ contentType: "application/octet-stream", body: Buffer.from(albumThumbnail.blob) });
+    }
+    return route.fulfill({ contentType: "application/json", body: envelope() });
+  });
+
+  await page.goto("/");
+  await page.getByLabel("Email").fill("priority@example.test");
+  await page.getByLabel("Password", { exact: true }).fill(fixture.password);
+  await page.getByRole("button", { name: "Sign in", exact: true }).click();
+  await expect.poll(() => activeGallery, { timeout: 60_000 }).toBe(32);
+  released = true;
+  await page.getByRole("button", { name: "Albums", exact: true }).click();
+  await page.locator(".album-tile").click();
+  await expect(page.getByRole("heading", { name: fixture.album.name })).toBeVisible();
+  await expect(page.locator(".file-preview.loaded")).toHaveCount(2, { timeout: 60_000 });
+  expect(downloadsAfterRelease.slice(0, 4)).toEqual(expect.arrayContaining([
+    "album-priority-0.sp", "album-priority-1.sp",
+  ]));
+  releaseGallery();
+  await expect.poll(() => activeGallery).toBe(0);
+});
+
+test("windows a huge gallery and prioritizes thumbnails after a deep scroll jump", async ({ page, browserName }) => {
+  test.skip(browserName !== "chromium", "large-library windowing needs one browser gate");
+  const encryptedThumbnail = Buffer.from(fixture.galleryFile.blobBase64, "base64");
+  const fileCount = 2_500;
+  let activeInitialDownloads = 0;
+  let releaseInitialDownloads!: () => void;
+  const initialGate = new Promise<void>((resolve) => { releaseInitialDownloads = resolve; });
+  let scrolled = false;
+  const downloadsAfterScroll: string[] = [];
+
+  await page.route("**/api/v2/**", async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    const fields = new URLSearchParams(route.request().postData() ?? "");
+    if (path.endsWith("/login/preLogin")) return route.fulfill({ contentType: "application/json", body: envelope({ salt: fixture.accountSaltHex }) });
+    if (path.endsWith("/login/login")) return route.fulfill({ contentType: "application/json", body: envelope({
+      token: "huge-gallery-token", userId: "huge-gallery-user", keyBundle: fixture.keyBundleBase64,
+      serverPublicKey: fixture.params.serverPublicKeyBase64, isKeyBackedUp: "1",
+      homeFolder: `huge-gallery-${Date.now()}`, addons: [],
+    }) });
+    if (path.endsWith("/sync/getUpdates")) return route.fulfill({ contentType: "application/json", body: envelope({
+      files: Array.from({ length: fileCount }, (_, index) => ({
+        file: `huge-${index}.sp`, version: 1,
+        headers: `${fixture.galleryFile.outerHeaderBase64Url}*${fixture.galleryFile.outerHeaderBase64Url}`,
+        dateCreated: Date.UTC(2010, 0, 1) + index * 86_400_000,
+        dateModified: 1_700_000_000_000 + index,
+      })),
+      trash: [], albums: [], albumFiles: [], contacts: [], deletes: [],
+    }) });
+    if (path.endsWith("/sync/download") && fields.get("thumb") === "1") {
+      const file = fields.get("file") ?? "";
+      if (!scrolled) {
+        activeInitialDownloads += 1;
+        await initialGate;
+        activeInitialDownloads -= 1;
+      } else {
+        downloadsAfterScroll.push(file);
+      }
+      return route.fulfill({ contentType: "application/octet-stream", body: encryptedThumbnail }).catch(() => undefined);
+    }
+    return route.fulfill({ contentType: "application/json", body: envelope() });
+  });
+
+  await page.goto("/");
+  await page.getByLabel("Email").fill("huge-gallery@example.test");
+  await page.getByLabel("Password", { exact: true }).fill(fixture.password);
+  await page.getByRole("button", { name: "Sign in", exact: true }).click();
+  const virtualWindow = page.locator(".virtual-file-window");
+  await expect(virtualWindow).toHaveAttribute("data-total-count", String(fileCount), { timeout: 60_000 });
+  await expect(page.getByText(`${fileCount} items`, { exact: true })).toBeVisible();
+  expect(await page.locator(".file-tile").count()).toBeLessThan(200);
+  await expect.poll(() => activeInitialDownloads, { timeout: 60_000 }).toBeGreaterThan(0);
+
+  scrolled = true;
+  const scrollMetrics = await page.evaluate(() => {
+    window.scrollTo(0, document.body.scrollHeight);
+    return {
+      body: document.body.scrollHeight,
+      document: document.documentElement.scrollHeight,
+      y: window.scrollY,
+      grid: document.querySelector<HTMLElement>(".virtual-file-window")?.offsetHeight ?? -1,
+    };
+  });
+  expect(scrollMetrics.y, JSON.stringify(scrollMetrics)).toBeGreaterThan(2_000);
+  await page.waitForTimeout(200);
+  const settledMetrics = await page.evaluate(() => ({
+    y: window.scrollY,
+    body: document.body.scrollHeight,
+    grid: document.querySelector<HTMLElement>(".virtual-file-window")?.offsetHeight ?? -1,
+    start: document.querySelector<HTMLElement>(".virtual-file-window")?.dataset.visibleStart ?? "missing",
+    top: document.querySelector<HTMLElement>(".virtual-file-window")?.getBoundingClientRect().top ?? -1,
+  }));
+  expect(Number(settledMetrics.start), JSON.stringify(settledMetrics)).toBeGreaterThan(2_000);
+  await expect.poll(async () => Number(await virtualWindow.getAttribute("data-visible-start")), { timeout: 30_000 })
+    .toBeGreaterThan(2_000);
+  await expect.poll(async () => Number(await page.locator(".file-tile[data-file-index]").first().getAttribute("data-file-index")))
+    .toBeGreaterThan(2_000);
+  const sectionLabels = await page.locator(".virtual-date-section").allTextContents();
+  expect(new Set(sectionLabels).size).toBeGreaterThan(1);
+  const bottomPosition = await page.evaluate(() => window.scrollY);
+  await page.waitForTimeout(400);
+  expect(Math.abs(await page.evaluate(() => window.scrollY) - bottomPosition)).toBeLessThan(2);
+  await page.evaluate(() => window.scrollBy(0, -600));
+  const raisedPosition = await page.evaluate(() => window.scrollY);
+  expect(raisedPosition).toBeLessThan(bottomPosition);
+  expect(raisedPosition).toBeGreaterThan(0);
+  await page.waitForTimeout(400);
+  expect(Math.abs(await page.evaluate(() => window.scrollY) - raisedPosition)).toBeLessThan(2);
+
+  const previousStart = Number(await virtualWindow.getAttribute("data-visible-start"));
+  const retainedIndex = await page.evaluate(() => {
+    const tiles = [...document.querySelectorAll<HTMLElement>(".file-tile[data-file-index]")];
+    const tile = tiles[Math.floor(tiles.length / 2)];
+    if (!tile) throw new Error("expected a rendered file tile");
+    (window as Window & { __retainedVirtualTile?: HTMLElement }).__retainedVirtualTile = tile;
+    return Number(tile.dataset.fileIndex);
+  });
+  await page.evaluate(() => window.scrollBy(0, -200));
+  await expect.poll(async () => Number(await virtualWindow.getAttribute("data-visible-start"))).toBeLessThan(previousStart);
+  expect(await page.evaluate((index) => {
+    const retained = (window as Window & { __retainedVirtualTile?: HTMLElement }).__retainedVirtualTile;
+    return retained?.isConnected === true &&
+      retained === document.querySelector(`.file-tile[data-file-index="${index}"]`);
+  }, retainedIndex)).toBe(true);
+
+  await expect.poll(() => downloadsAfterScroll.length, { timeout: 60_000 }).toBeGreaterThan(5);
+  expect(downloadsAfterScroll.slice(0, 5).every((file) => Number(/huge-(\d+)\.sp/u.exec(file)?.[1]) < 500)).toBe(true);
+  releaseInitialDownloads();
+  await expect.poll(() => activeInitialDownloads).toBe(0);
+});
+
 test("renders album covers and sends encrypted item or blank cover mutations", async ({ page, browserName }) => {
   test.skip(browserName !== "chromium", "album cover UI and worker encryption need one browser gate");
   const image = new Uint8Array(readFileSync(new URL("../../src/assets/stingle-logo.png", import.meta.url)));
@@ -264,6 +471,7 @@ test("renders album covers and sends encrypted item or blank cover mutations", a
       }],
       albumFiles: [
         { file: "album-cover.sp", albumId: "fixture-album", version: 1, headers, dateCreated: 1_700_000_000_000, dateModified: 1_700_000_000_001 },
+        { file: "album-second.sp", albumId: "fixture-album", version: 1, headers, dateCreated: 1_699_999_999_999, dateModified: 1_700_000_000_000 },
         { file: "default-first.sp", albumId: "default-album", version: 1, headers, dateCreated: 1_698_000_000_000, dateModified: 1_698_000_000_001 },
       ],
     }) });
@@ -285,8 +493,9 @@ test("renders album covers and sends encrypted item or blank cover mutations", a
   await expect(album).toHaveCount(2, { timeout: 60_000 });
   await album.first().click();
   await expect(page.getByRole("heading", { name: fixture.album.name })).toBeVisible();
+  await expect(page.locator(".file-tile")).toHaveCount(2);
   await page.getByRole("button", { name: "Select items" }).click();
-  await page.getByRole("button", { name: "album-cover.png" }).click();
+  await page.getByRole("button", { name: "album-cover.png" }).first().click();
   await page.getByRole("button", { name: "Set as cover" }).click();
   await expect.poll(() => coverMutations.length).toBe(1);
   page.once("dialog", (dialog) => void dialog.accept());
@@ -298,6 +507,16 @@ test("renders album covers and sends encrypted item or blank cover mutations", a
     expect(fields.get("params")).not.toContain("album-cover.sp");
     expect(fields.get("params")).not.toContain("__b__");
   }
+  await page.getByRole("button", { name: "Select items" }).click();
+  await page.getByRole("button", { name: "album-cover.png" }).first().click();
+  await page.getByRole("button", { name: "Move to trash" }).click();
+  await expect(page.locator(".file-tile")).toHaveCount(1);
+  await page.getByRole("button", { name: "album-cover.png" }).click();
+  const viewer = page.getByRole("dialog", { name: "album-cover.png" });
+  await expect(viewer).toBeVisible();
+  page.once("dialog", (dialog) => void dialog.accept());
+  await viewer.getByRole("button", { name: /Delete/u }).click();
+  await expect(page.locator(".file-tile")).toHaveCount(0);
 });
 
 test("prepares, encrypts, uploads, and re-syncs a browser-selected photo", async ({ page, browserName }) => {

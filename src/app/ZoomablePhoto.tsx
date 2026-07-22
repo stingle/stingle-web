@@ -33,13 +33,6 @@ export function ZoomablePhoto({
   const dragRef = useRef<Position | undefined>(undefined);
 
   useEffect(() => {
-    setScale(1);
-    setPosition({ x: 0, y: 0 });
-    setNatural(undefined);
-    setOriginalRendered(false);
-  }, [previewUrl]);
-
-  useEffect(() => {
     setOriginalRendered(false);
   }, [originalUrl]);
 
@@ -64,11 +57,23 @@ export function ZoomablePhoto({
     return { width: Math.round(natural.width * ratio), height: Math.round(natural.height * ratio) };
   }, [natural]);
 
-  function rememberSize(event: SyntheticEvent<HTMLImageElement>): void {
+  function imageSize(event: SyntheticEvent<HTMLImageElement>): Size | undefined {
     const image = event.currentTarget;
-    if (image.naturalWidth && image.naturalHeight) {
-      setNatural((current) => current ?? { width: image.naturalWidth, height: image.naturalHeight });
-    }
+    return image.naturalWidth && image.naturalHeight
+      ? { width: image.naturalWidth, height: image.naturalHeight }
+      : undefined;
+  }
+
+  function rememberPreviewSize(event: SyntheticEvent<HTMLImageElement>): void {
+    const size = imageSize(event);
+    // Stingle thumbnails have orientation baked in, so they are the source of
+    // truth for the stable on-screen aspect even when the original loaded first.
+    if (size) setNatural(size);
+  }
+
+  function rememberOriginalSize(event: SyntheticEvent<HTMLImageElement>): void {
+    const size = imageSize(event);
+    if (size) setNatural((current) => current ?? size);
   }
 
   function reset(): void {
@@ -99,8 +104,8 @@ export function ZoomablePhoto({
             className="zoom-inner"
             style={{ width: fit.width, height: fit.height, transform: `translate(${position.x}px, ${position.y}px) scale(${scale})` }}
           >
-            {previewUrl ? <img className="zoom-preview" src={previewUrl} alt={alt} draggable={false} onLoad={rememberSize} /> : null}
-            {originalUrl ? <img className="zoom-original" src={originalUrl} alt={alt} draggable={false} onLoad={(event) => { rememberSize(event); setOriginalRendered(true); }} style={{ opacity: originalRendered ? 1 : 0 }} /> : null}
+            {previewUrl ? <img className="zoom-preview" src={previewUrl} alt={alt} draggable={false} onLoad={rememberPreviewSize} /> : null}
+            {originalUrl ? <img className="zoom-original" src={originalUrl} alt={alt} draggable={false} onLoad={(event) => { rememberOriginalSize(event); setOriginalRendered(true); }} style={{ opacity: originalRendered ? 1 : 0 }} /> : null}
           </div>
         ) : (
           <img
@@ -108,7 +113,10 @@ export function ZoomablePhoto({
             src={previewUrl ?? originalUrl}
             alt={alt}
             draggable={false}
-            onLoad={(event) => { rememberSize(event); if (!previewUrl) setOriginalRendered(true); }}
+            onLoad={(event) => {
+              if (previewUrl) rememberPreviewSize(event);
+              else { rememberOriginalSize(event); setOriginalRendered(true); }
+            }}
           />
         )}
       </div>

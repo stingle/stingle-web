@@ -28,7 +28,7 @@ export interface AuthApi {
   createAccount(input: RegistrationRequest): Promise<void>;
   logout(token: string): Promise<void>;
   getUpdates(token: string, cursors: SyncCursors): Promise<SyncUpdates>;
-  downloadEncrypted(token: string, file: string, set: number, isThumb: boolean): Promise<Uint8Array>;
+  downloadEncrypted(token: string, file: string, set: number, isThumb: boolean, signal?: AbortSignal): Promise<Uint8Array>;
   getDownloadUrl(token: string, file: string, set: number): Promise<string>;
   addAlbum(token: string, params: string): Promise<void>;
   moveFiles(token: string, params: string): Promise<void>;
@@ -184,9 +184,9 @@ export class AuthService {
     return this.vault.decryptLibrary(albums, files);
   }
 
-  async downloadEncrypted(file: string, set: number, isThumb: boolean): Promise<Uint8Array> {
+  async downloadEncrypted(file: string, set: number, isThumb: boolean, signal?: AbortSignal): Promise<Uint8Array> {
     if (!this.session) throw new Error("not authenticated");
-    return this.api.downloadEncrypted(this.session.token, file, set, isThumb);
+    return this.api.downloadEncrypted(this.session.token, file, set, isThumb, signal);
   }
 
   async getDownloadUrl(file: string, set: number): Promise<string> {

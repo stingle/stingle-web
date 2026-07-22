@@ -1,4 +1,4 @@
-import { IDBFactory } from "fake-indexeddb";
+import { IDBFactory, IDBKeyRange } from "fake-indexeddb";
 import { describe, expect, test, vi } from "vitest";
 
 import { DeleteEventType, type SyncUpdates, ZERO_CURSORS } from "../../src/sync/model";
@@ -7,6 +7,30 @@ import { SyncEngine } from "../../src/sync/sync-engine";
 
 function emptyUpdates(overrides: Partial<SyncUpdates> = {}): SyncUpdates {
   return { files: [], trash: [], albums: [], albumFiles: [], contacts: [], deletes: [], ...overrides };
+}
+
+async function createVersionOneMirror(factory: IDBFactory, accountKey: string): Promise<void> {
+  const opening = factory.open(`stingle-web-mirror-v1-${encodeURIComponent(accountKey)}`, 1);
+  opening.onupgradeneeded = () => {
+    const database = opening.result;
+    const files = database.createObjectStore("files", { keyPath: "file" });
+    files.createIndex("dateCreated", "dateCreated");
+    const trash = database.createObjectStore("trash", { keyPath: "file" });
+    trash.createIndex("dateCreated", "dateCreated");
+    const albums = database.createObjectStore("albums", { keyPath: "albumId" });
+    albums.createIndex("dateModified", "dateModified");
+    const albumFiles = database.createObjectStore("albumFiles", { keyPath: ["albumId", "file"] });
+    albumFiles.createIndex("albumId", "albumId");
+    albumFiles.createIndex("dateCreated", "dateCreated");
+    const contacts = database.createObjectStore("contacts", { keyPath: "userId" });
+    contacts.createIndex("dateModified", "dateModified");
+    database.createObjectStore("meta", { keyPath: "key" });
+  };
+  const database = await new Promise<IDBDatabase>((resolve, reject) => {
+    opening.onsuccess = () => resolve(opening.result);
+    opening.onerror = () => reject(opening.error);
+  });
+  database.close();
 }
 
 describe("per-account sync mirror", () => {
@@ -99,7 +123,7 @@ describe("per-account sync mirror", () => {
   });
 
   test("lists gallery, trash, albums, and album items newest first", async () => {
-    const store = await MirrorStore.open("account-list", new IDBFactory());
+    const store = await MirrorStore.open("account-list", new IDBFactory(), IDBKeyRange);
     const album = {
       albumId: "album", encPrivateKey: "esk", publicKey: "pk", metadata: "m",
       isShared: true, isHidden: false, isOwner: false, members: "", permissions: "000",
@@ -109,18 +133,25 @@ describe("per-account sync mirror", () => {
       files: [
         { file: "old.sp", version: 1, headers: "a", dateCreated: 10, dateModified: 10 },
         { file: "new.sp", version: 1, headers: "b", dateCreated: 20, dateModified: 20 },
+        { file: "newest.sp", version: 1, headers: "c", dateCreated: 30, dateModified: 30 },
       ],
       trash: [{ file: "trash.sp", version: 1, headers: "c", dateCreated: 5, dateModified: 5 }],
       albums: [album],
       albumFiles: [
         { file: "one.sp", albumId: "album", version: 1, headers: "d", dateCreated: 30, dateModified: 30 },
         { file: "two.sp", albumId: "album", version: 1, headers: "e", dateCreated: 40, dateModified: 40 },
+        { file: "three.sp", albumId: "album", version: 1, headers: "f", dateCreated: 50, dateModified: 50 },
       ],
     }));
-    expect((await store.listFiles("files", 1)).map((file) => file.file)).toEqual(["new.sp"]);
+    expect(await store.countFiles("files")).toBe(3);
+    expect(await store.listFileDateGroups("files")).toEqual([{ dateCreated: 30, count: 3 }]);
+    expect((await store.listFiles("files", 1)).map((file) => file.file)).toEqual(["newest.sp"]);
+    expect((await store.listFiles("files", 1, 1)).map((file) => file.file)).toEqual(["new.sp"]);
     expect((await store.listFiles("trash")).map((file) => file.file)).toEqual(["trash.sp"]);
     expect((await store.listAlbums()).map((value) => value.albumId)).toEqual(["album"]);
-    expect((await store.listAlbumFiles("album")).map((file) => file.file)).toEqual(["two.sp", "one.sp"]);
+    expect(await store.countAlbumFiles("album")).toBe(3);
+    expect(await store.listAlbumFileDateGroups("album")).toEqual([{ dateCreated: 50, count: 3 }]);
+    expect((await store.listAlbumFiles("album", 2, 1)).map((file) => file.file)).toEqual(["two.sp", "one.sp"]);
     store.close();
   });
 
@@ -138,6 +169,55 @@ describe("per-account sync mirror", () => {
     expect((await store.listFiles("files")).map((file) => file.file)).toEqual(["gallery-upload.sp"]);
     expect((await store.listAlbumFiles("album")).map((file) => file.file)).toEqual(["album-upload.sp"]);
     expect(await store.getCursors()).toEqual(ZERO_CURSORS);
+    await store.removeFile("files", gallery.file);
+    await store.removeFile("albumFiles", album.file, album.albumId);
+    expect(await store.listFiles("files")).toEqual([]);
+    expect(await store.listAlbumFiles("album")).toEqual([]);
+    store.close();
+  });
+
+  test("persists encrypted thumbnails across reopen and rejects stale cache entries", async () => {
+    const factory = new IDBFactory();
+    const file = {
+      file: "cached.sp", version: 1, headers: "file-header*thumb-header", dateCreated: 20, dateModified: 21,
+      isLocal: false, isRemote: true, reupload: false,
+    };
+    let store = await MirrorStore.open("account-thumbnail-cache", factory);
+    const encrypted = new Uint8Array([0x53, 0x50, 1, 9, 8, 7]);
+    await store.putEncryptedThumbnail("gallery:cached.sp", file, encrypted);
+    encrypted.fill(0);
+    expect(await store.getEncryptedThumbnail("gallery:cached.sp", file)).toEqual(
+      new Uint8Array([0x53, 0x50, 1, 9, 8, 7]),
+    );
+    store.close();
+
+    store = await MirrorStore.open("account-thumbnail-cache", factory);
+    expect(await store.getEncryptedThumbnail("gallery:cached.sp", file)).toEqual(
+      new Uint8Array([0x53, 0x50, 1, 9, 8, 7]),
+    );
+    expect(await store.getEncryptedThumbnail("gallery:cached.sp", { ...file, headers: "updated*headers" }))
+      .toBeUndefined();
+    expect(await store.getEncryptedThumbnail("gallery:cached.sp", { ...file, version: 2 }))
+      .toBeUndefined();
+    await store.removeEncryptedThumbnail("gallery:cached.sp");
+    expect(await store.getEncryptedThumbnail("gallery:cached.sp", file)).toBeUndefined();
+    store.close();
+  });
+
+  test("adds the encrypted thumbnail cache when upgrading an existing mirror", async () => {
+    const factory = new IDBFactory();
+    await createVersionOneMirror(factory, "account-upgrade");
+    const store = await MirrorStore.open("account-upgrade", factory, IDBKeyRange);
+    const file = {
+      file: "upgrade.sp", version: 1, headers: "a*b", dateCreated: 1, dateModified: 2,
+      isLocal: false, isRemote: true, reupload: false,
+    };
+    await store.putUploadedFile(file);
+    await store.putUploadedFile({ ...file, file: "album-upgrade.sp", albumId: "album" });
+    await store.putEncryptedThumbnail("gallery:upgrade.sp", file, new Uint8Array([0x53, 0x50, 1]));
+    expect((await store.listFiles("files"))[0]?.file).toBe("upgrade.sp");
+    expect((await store.listAlbumFiles("album"))[0]?.file).toBe("album-upgrade.sp");
+    expect(await store.getEncryptedThumbnail("gallery:upgrade.sp", file)).toEqual(new Uint8Array([0x53, 0x50, 1]));
     store.close();
   });
 });

@@ -61,6 +61,22 @@ describe("API client transport", () => {
     expect(fields.get("thumb")).toBe("1");
   });
 
+  test("cancels an in-flight thumbnail download through the caller signal", async () => {
+    const fetchMock = vi.fn<typeof fetch>(async (_input, init) => {
+      await new Promise<void>((_resolve, reject) => init?.signal?.addEventListener(
+        "abort",
+        () => reject(new DOMException("aborted", "AbortError")),
+        { once: true },
+      ));
+      throw new Error("unreachable");
+    });
+    const client = new ApiClient({ fetch: fetchMock });
+    const controller = new AbortController();
+    const download = client.downloadEncrypted("token", "safe.sp", 0, true, controller.signal);
+    controller.abort();
+    await expect(download).rejects.toThrow(/cancelled/u);
+  });
+
   test("never accepts a JSON API error body as encrypted media", async () => {
     const client = new ApiClient({
       fetch: vi.fn<typeof fetch>().mockResolvedValue(jsonResponse({ status: "nok", errors: ["missing"], parts: {} })),

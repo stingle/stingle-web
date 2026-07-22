@@ -108,6 +108,9 @@ dd { margin: 0; overflow-wrap: anywhere; font-weight: 700; }
 .back-link { margin: 0 0 8px; border: 0; padding: 0; background: transparent; color: var(--blue); font-size: .76rem; font-weight: 700; }
 
 .file-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(148px, 1fr)); gap: 8px; }
+.virtual-file-window { position: relative; min-height: 1px; overflow-anchor: none; }
+.virtual-placeholder { border-color: transparent; background: #202229; }
+.virtual-date-section { position: absolute; left: 2px; height: 24px; margin: 0; color: var(--muted); font-size: .8rem; font-weight: 650; }
 .file-groups { display: grid; gap: 24px; }
 .file-group > h2 { margin: 0 0 9px 2px; color: var(--muted); font-size: .8rem; font-weight: 650; }
 .file-tile { position: relative; min-width: 0; aspect-ratio: 1; padding: 0; overflow: hidden; border: 2px solid transparent; border-radius: 8px; background: var(--bg3); color: var(--fg); text-align: left; }
@@ -137,7 +140,7 @@ dd { margin: 0; overflow-wrap: anywhere; font-weight: 700; }
 .zoom-inner:active { cursor: grabbing; }
 .zoom-inner img { position: absolute; inset: 0; width: 100%; height: 100%; user-select: none; -webkit-user-drag: none; }
 .zoom-original { transition: opacity .2s ease; }
-.zoom-probe { max-width: 92vw; max-height: 88vh; object-fit: contain; user-select: none; -webkit-user-drag: none; }
+.zoom-probe { width: 92vw; height: 88vh; object-fit: contain; user-select: none; -webkit-user-drag: none; }
 .zoom-controls { position: fixed; z-index: 102; bottom: 46px; left: 50%; transform: translateX(-50%); display: flex; align-items: center; gap: 8px; }
 .zoom-controls button, .viewer-nav, .viewer-close { border: 1px solid #ffffff26; background: #0009; color: white; }
 .zoom-controls button { min-width: 38px; border-radius: 6px; padding: 7px 10px; }

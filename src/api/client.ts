@@ -212,10 +212,14 @@ export class ApiClient {
     return parseSyncUpdates(envelope);
   }
 
-  async downloadEncrypted(token: string, file: string, set: number, isThumb: boolean): Promise<Uint8Array> {
+  async downloadEncrypted(token: string, file: string, set: number, isThumb: boolean, signal?: AbortSignal): Promise<Uint8Array> {
     if (![0, 1, 2].includes(set)) throw new ApiError("Invalid file set.", "protocol");
     const controller = new AbortController();
-    const timeout = globalThis.setTimeout(() => controller.abort(), this.timeoutMs);
+    let timedOut = false;
+    const abort = (): void => controller.abort();
+    signal?.addEventListener("abort", abort, { once: true });
+    if (signal?.aborted) controller.abort();
+    const timeout = globalThis.setTimeout(() => { timedOut = true; controller.abort(); }, this.timeoutMs);
     let response: Response;
     try {
       response = await this.fetchImpl(`${this.baseUrl}${apiPaths.download}`, {
@@ -229,10 +233,12 @@ export class ApiClient {
         signal: controller.signal,
       });
     } catch (error) {
-      if (controller.signal.aborted) throw new ApiError("The download timed out.", "timeout");
+      if (timedOut) throw new ApiError("The download timed out.", "timeout");
+      if (signal?.aborted) throw new ApiError("The download was cancelled.", "network");
       throw new ApiError(error instanceof Error ? error.message : "Download failed.", "network");
     } finally {
       globalThis.clearTimeout(timeout);
+      signal?.removeEventListener("abort", abort);
     }
     if (!response.ok) throw new ApiError(`Download returned HTTP ${response.status}.`, "http", response.status);
     const bytes = new Uint8Array(await response.arrayBuffer());

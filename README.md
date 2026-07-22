@@ -9,6 +9,7 @@ and connected to a compatible Stingle API server.
 
 - Create an account, sign in, restore a browser session, and sign out.
 - Browse Gallery, Albums, Shared albums, and Trash.
+- Window large galleries and albums, reuse encrypted thumbnail caches after refresh, and prioritize the visible scroll range.
 - View JPEG, PNG, WebP, AVIF, GIF, and locally converted HEIC/HEIF images.
 - Play authenticated encrypted video through browser range requests.
 - Upload encrypted photos and videos from the browser.
@@ -26,7 +27,8 @@ Encryption, decryption, file-header processing, and private-key operations run
 locally in a dedicated crypto worker. Account and album private keys are not
 sent to the API server. Decrypted thumbnails, photos, and compatibility video
 blobs use revocable in-memory URLs and are not stored in Cache Storage or
-IndexedDB.
+IndexedDB. Downloaded thumbnail ciphertext is cached in the per-account
+IndexedDB mirror and must be decrypted again before display.
 
 Refresh-session restoration stores an authenticated ciphertext and a
 non-extractable browser `CryptoKey`. This protects against casual disk
